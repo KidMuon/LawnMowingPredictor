@@ -7,6 +7,11 @@
 // see the README for scheduling examples. It's safe to run more often
 // than your mowing interval: it looks up your mowing history and any
 // already-scheduled task in Todoist before creating a new one.
+//
+// API credentials (OPENWEATHERMAP_API_KEY and TODOIST_API_TOKEN) are read
+// from the process environment. A .env file (default: .env in the working
+// directory) is loaded first as a convenience, but never overrides a
+// variable that's already set in the real environment.
 package main
 
 import (
@@ -25,8 +30,20 @@ import (
 
 func main() {
 	configPath := flag.String("config", "", "path to YAML config file (default: config.yaml, or $LAWNMOWER_CONFIG)")
+	envFilePath := flag.String("env-file", "", "path to a .env file holding OPENWEATHERMAP_API_KEY and TODOIST_API_TOKEN (default: .env, or $LAWNMOWER_ENV_FILE)")
 	dryRun := flag.Bool("dry-run", false, "compute and log the decision, but never create a Todoist task")
 	flag.Parse()
+
+	envPath, envPathExplicit := *envFilePath, *envFilePath != ""
+	if envPath == "" {
+		envPath, envPathExplicit = os.Getenv("LAWNMOWER_ENV_FILE"), os.Getenv("LAWNMOWER_ENV_FILE") != ""
+	}
+	if envPath == "" {
+		envPath = ".env"
+	}
+	if err := config.LoadEnvFile(envPath, envPathExplicit); err != nil {
+		log.Fatalf("loading .env file: %v", err)
+	}
 
 	path := *configPath
 	if path == "" {

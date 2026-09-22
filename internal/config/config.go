@@ -3,6 +3,11 @@
 // required secrets (API credentials) from the environment. Secrets are
 // intentionally never read from the YAML file so they can't accidentally
 // be committed to version control alongside the rest of the config.
+//
+// Secrets are commonly supplied via a local .env file (see LoadEnvFile);
+// that file is just a convenient way to populate the process environment
+// and is treated no differently than variables exported some other way -
+// real environment variables always take precedence over the .env file.
 package config
 
 import (
@@ -11,8 +16,30 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/joho/godotenv"
 	"gopkg.in/yaml.v3"
 )
+
+// LoadEnvFile loads KEY=VALUE pairs from a .env-style file at path into the
+// process environment. It never overrides a variable that's already set,
+// so real environment variables (exported manually, injected by a systemd
+// EnvironmentFile, set as CI secrets, etc.) always take precedence over the
+// file.
+//
+// If explicit is false, path is treated as a default (e.g. ".env") rather
+// than something the caller specifically asked for, so a missing file is
+// not an error - it's normal to run without one when secrets are already
+// present in the environment. If explicit is true, a missing file is
+// reported as an error.
+func LoadEnvFile(path string, explicit bool) error {
+	if err := godotenv.Load(path); err != nil {
+		if os.IsNotExist(err) && !explicit {
+			return nil
+		}
+		return fmt.Errorf("loading env file %q: %w", path, err)
+	}
+	return nil
+}
 
 // Config holds all application settings.
 type Config struct {

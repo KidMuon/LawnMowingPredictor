@@ -5,6 +5,9 @@
 # Your real config (copy config.example.yaml to this and fill it in)
 config.yaml
 
+# Your real secrets (copy .env.example to this and fill it in)
+.env
+
 # Editor/OS cruft
 .DS_Store
 

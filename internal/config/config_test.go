@@ -171,3 +171,61 @@ func TestLoad_MissingFileError(t *testing.T) {
 		t.Fatalf("expected error for missing explicit config file")
 	}
 }
+
+func TestLoadEnvFile_SetsUnsetVariables(t *testing.T) {
+	t.Cleanup(func() {
+		os.Unsetenv("LAWNMOWER_TEST_DOTENV_A")
+		os.Unsetenv("LAWNMOWER_TEST_DOTENV_B")
+	})
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".env")
+	contents := "LAWNMOWER_TEST_DOTENV_A=from-file\nLAWNMOWER_TEST_DOTENV_B=also-from-file\n"
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatalf("writing test .env file: %v", err)
+	}
+
+	if err := LoadEnvFile(path, true); err != nil {
+		t.Fatalf("LoadEnvFile() error = %v", err)
+	}
+
+	if got := os.Getenv("LAWNMOWER_TEST_DOTENV_A"); got != "from-file" {
+		t.Errorf("LAWNMOWER_TEST_DOTENV_A = %q, want from-file", got)
+	}
+	if got := os.Getenv("LAWNMOWER_TEST_DOTENV_B"); got != "also-from-file" {
+		t.Errorf("LAWNMOWER_TEST_DOTENV_B = %q, want also-from-file", got)
+	}
+}
+
+func TestLoadEnvFile_DoesNotOverrideExistingVariables(t *testing.T) {
+	t.Setenv("LAWNMOWER_TEST_DOTENV_C", "real-environment-wins")
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".env")
+	contents := "LAWNMOWER_TEST_DOTENV_C=from-file\n"
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatalf("writing test .env file: %v", err)
+	}
+
+	if err := LoadEnvFile(path, true); err != nil {
+		t.Fatalf("LoadEnvFile() error = %v", err)
+	}
+
+	if got := os.Getenv("LAWNMOWER_TEST_DOTENV_C"); got != "real-environment-wins" {
+		t.Errorf("LAWNMOWER_TEST_DOTENV_C = %q, want real-environment-wins (existing env should not be overridden)", got)
+	}
+}
+
+func TestLoadEnvFile_MissingDefaultIsNotAnError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "does-not-exist.env")
+	if err := LoadEnvFile(path, false); err != nil {
+		t.Fatalf("expected no error for a missing default .env file, got %v", err)
+	}
+}
+
+func TestLoadEnvFile_MissingExplicitIsAnError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "does-not-exist.env")
+	if err := LoadEnvFile(path, true); err == nil {
+		t.Fatalf("expected error for a missing explicitly-requested .env file")
+	}
+}

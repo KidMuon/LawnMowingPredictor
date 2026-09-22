@@ -58,15 +58,36 @@ $EDITOR config.yaml   # set your latitude/longitude and adjust to taste
 `config.yaml` is gitignored - it holds your location and preferences, not
 secrets, but there's no reason to commit it either.
 
-### 3. Set the two required secrets as environment variables
+### 3. Set the two required secrets
 
-These are **never** read from the config file, so they can't accidentally
-end up committed:
+These are **never** read from `config.yaml`, so they can't accidentally end
+up committed. The easiest way to supply them is a `.env` file:
+
+```bash
+cp .env.example .env
+$EDITOR .env   # fill in OPENWEATHERMAP_API_KEY and TODOIST_API_TOKEN
+```
+
+`.env` is gitignored and is loaded automatically from the current
+directory on every run - no need to `source` it or export anything
+yourself. If a variable is already set in your real environment (e.g.
+exported in your shell, injected by systemd's `EnvironmentFile`, or set as
+a CI secret), that value wins and the `.env` file is ignored for it, so
+it's safe to keep a `.env` around even in environments that also set these
+some other way.
+
+If you'd rather not use a file at all, exporting them directly works the
+same way:
 
 ```bash
 export OPENWEATHERMAP_API_KEY="..."
 export TODOIST_API_TOKEN="..."
 ```
+
+To use a `.env` file somewhere other than the default `./.env`, pass
+`-env-file /path/to/file` or set `LAWNMOWER_ENV_FILE`. Unlike the default
+path, an explicitly-specified one must exist or the app exits with an
+error.
 
 ### 4. Build and run
 
@@ -93,15 +114,21 @@ good day within a currently-eligible window.
 
 ### cron
 
+The default `.env` lookup is relative to the current working directory,
+which cron doesn't set to your project directory for you - pass
+`-env-file` with an absolute path (and lock the file down, e.g.
+`chmod 600 /path/to/.env`) rather than relying on the default:
+
 ```
 # Every day at 7am
-0 7 * * * OPENWEATHERMAP_API_KEY=... TODOIST_API_TOKEN=... /path/to/lawnmower -config /path/to/config.yaml >> /var/log/lawnmower.log 2>&1
+0 7 * * * /path/to/lawnmower -config /path/to/config.yaml -env-file /path/to/.env >> /var/log/lawnmower.log 2>&1
 ```
 
-(Prefer keeping the secrets out of the crontab itself - e.g. source them
-from a root-only-readable env file first.)
-
 ### systemd timer
+
+systemd's own `EnvironmentFile=` (shown below) works just as well as
+`-env-file` here and needs no extra flag, since it sets real environment
+variables before the process starts.
 
 `/etc/systemd/system/lawnmower.service`:
 
