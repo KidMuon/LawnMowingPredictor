@@ -1,0 +1,9 @@
+# Build output
+/lawnmower
+/bin/
+
+# Your real config (copy config.example.yaml to this and fill it in)
+config.yaml
+
+# Editor/OS cruft
+.DS_Store

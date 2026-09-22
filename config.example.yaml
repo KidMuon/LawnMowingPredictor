@@ -1,0 +1,43 @@
+# Copy this file to config.yaml and fill in your own values.
+#
+# config.yaml is gitignored on purpose: even though nothing in this file is
+# a secret, there's no reason to commit your personal location to source
+# control. The two actual secrets (API credentials) are never read from
+# this file at all - see the README for the environment variables they
+# come from instead.
+
+location:
+  # Coordinates for the OpenWeatherMap One Call 3.0 forecast. Find yours at
+  # https://www.latlong.net/ or similar.
+  latitude: 39.7392
+  longitude: -104.9903
+  # One of: standard (Kelvin), metric (Celsius), imperial (Fahrenheit).
+  # This only affects the units mentioned in the created task's
+  # description text - it has no effect on the rain-probability decision.
+  units: imperial
+
+schedule:
+  # Minimum number of days that must pass between the last completed mow
+  # and the next one this app will schedule.
+  min_days_between_mows: 7
+  # Maximum acceptable chance of rain (0-100) for a day to be considered
+  # safe to mow. The app picks the *first* eligible day at or under this
+  # threshold, not necessarily the driest day in the forecast.
+  rain_probability_threshold_percent: 30
+  # How far back (in days) to search your Todoist completed-task history
+  # to find the last mow. If nothing turns up in this window, the app
+  # assumes there's no relevant history and today is immediately eligible.
+  completed_lookback_days: 90
+
+todoist:
+  # Label used to find past mowing tasks and tag new ones. This label must
+  # already exist in your Todoist account (Todoist doesn't auto-create
+  # labels via this API the way it does via the app UI in all cases, so
+  # create it once yourself first). Do not include the leading "@".
+  label: lawn-mowing
+  # Text used for the created task.
+  task_content: "Mow the lawn"
+  # Optional: a Todoist project ID to file the task under. Leave blank (or
+  # remove the line) to use your Inbox. Find a project's ID in its URL in
+  # the Todoist web app, e.g. todoist.com/app/project/<this part>.
+  project_id: ""
