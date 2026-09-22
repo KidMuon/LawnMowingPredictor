@@ -7,10 +7,8 @@ config.yaml
 
 # Your real secrets (copy .env.example to this and fill it in)
 .env
+.env.*
+!.env.example
 
 # Editor/OS cruft
 .DS_Store
-
-# Environment variables
-.env
-.env.*
