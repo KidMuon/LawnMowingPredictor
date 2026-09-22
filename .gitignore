@@ -7,3 +7,7 @@ config.yaml
 
 # Editor/OS cruft
 .DS_Store
+
+# Environment variables
+.env
+.env.*
