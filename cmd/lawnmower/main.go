@@ -85,7 +85,7 @@ func run(ctx context.Context, cfg *config.Config, dryRun bool) error {
 	tc := todoist.NewClient(cfg.Secrets.TodoistAPIToken)
 
 	lookback := time.Duration(cfg.Schedule.CompletedLookbackDays) * 24 * time.Hour
-	lastMow, err := tc.FindLatestCompletedByLabel(ctx, cfg.Todoist.Label, lookback, forecast.Location)
+	lastMow, err := tc.FindLatestCompletedByLabel(ctx, cfg.Todoist.Label, lookback, forecast.TimeZone)
 	if err != nil {
 		return fmt.Errorf("looking up last completed mow: %w", err)
 	}
@@ -111,14 +111,10 @@ func run(ctx context.Context, cfg *config.Config, dryRun bool) error {
 		in.Forecast = append(in.Forecast, planner.ForecastDay{Date: d.Date, RainProbabilityPercent: d.RainProbabilityPercent})
 	}
 	if existing != nil {
-		in.Scheduled = &planner.ScheduledMow{Description: existing.Description}
-		if existing.Due != nil {
-			// An unparseable or missing due date leaves Due zero, which
-			// never matches a marker, so the task is treated as Pinned.
-			if due, err := time.Parse("2006-01-02", existing.Due.Date); err == nil {
-				in.Scheduled.Due = due
-			}
-		}
+		// A missing due date leaves Due zero, which never matches a
+		// marker, so the task is treated as Pinned.
+		due, _ := existing.DueDate()
+		in.Scheduled = &planner.ScheduledMow{Due: due, Description: existing.Description}
 	}
 
 	decision := planner.Plan(in)
@@ -160,8 +156,8 @@ func run(ctx context.Context, cfg *config.Config, dryRun bool) error {
 }
 
 func dueString(t *todoist.Task) string {
-	if t.Due == nil || t.Due.Date == "" {
-		return "no date"
+	if due, ok := t.DueDate(); ok {
+		return due.Format("2006-01-02")
 	}
-	return t.Due.Date
+	return "no date"
 }

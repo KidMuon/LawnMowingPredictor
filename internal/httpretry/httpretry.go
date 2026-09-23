@@ -9,19 +9,23 @@ import (
 	"time"
 )
 
-// Attempts is how many times a request is tried in total.
-const Attempts = 3
+// attempts is how many times a request is tried in total.
+const attempts = 3
 
-// DefaultDelay is the wait between attempts when a client doesn't set one.
+// DefaultDelay is the wait between attempts when Do is given zero.
 const DefaultDelay = 2 * time.Second
 
-// Do sends req, retrying up to Attempts times in total when the request
+// Do sends req, retrying up to attempts times in total when the request
 // fails outright or the server answers with a 5xx status. It waits delay
-// between attempts. The last response or error is returned as is.
+// between attempts, or DefaultDelay if delay is zero. The last response or
+// error is returned as is.
 func Do(client *http.Client, req *http.Request, delay time.Duration) (*http.Response, error) {
+	if delay == 0 {
+		delay = DefaultDelay
+	}
 	for attempt := 1; ; attempt++ {
 		resp, err := client.Do(req)
-		if attempt == Attempts || !temporary(resp, err) || req.Context().Err() != nil {
+		if attempt == attempts || !temporary(resp, err) || req.Context().Err() != nil {
 			return resp, err
 		}
 		if resp != nil {

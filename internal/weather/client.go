@@ -57,8 +57,8 @@ type Day struct {
 // Forecast is the daily forecast for a location, along with that
 // location's timezone.
 type Forecast struct {
-	// Location is the forecast location's timezone.
-	Location *time.Location
+	// TimeZone is the forecast location's timezone.
+	TimeZone *time.Location
 	Days     []Day
 }
 
@@ -113,11 +113,7 @@ func (c *Client) GetDailyForecast(ctx context.Context, lat, lon float64) (*Forec
 		httpClient = http.DefaultClient
 	}
 
-	delay := c.RetryDelay
-	if delay == 0 {
-		delay = httpretry.DefaultDelay
-	}
-	resp, err := httpretry.Do(httpClient, req, delay)
+	resp, err := httpretry.Do(httpClient, req, c.RetryDelay)
 	if err != nil {
 		return nil, fmt.Errorf("weather: request failed: %w", err)
 	}
@@ -166,7 +162,7 @@ func (c *Client) GetDailyForecast(ctx context.Context, lat, lon float64) (*Forec
 		// Unknown zone name: today's offset is close enough.
 		loc = time.FixedZone(parsed.Timezone, parsed.TimezoneOffset)
 	}
-	return &Forecast{Location: loc, Days: days}, nil
+	return &Forecast{TimeZone: loc, Days: days}, nil
 }
 
 func (c *Client) baseURL() string {

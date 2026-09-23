@@ -133,20 +133,31 @@ func (c *Client) FindScheduledMow(ctx context.Context, label string) (*Task, err
 		if !hasLabel(t.Labels, label) {
 			continue
 		}
-		if earliest == nil || dueSortKey(t) < dueSortKey(earliest) {
+		if earliest == nil || dueBefore(t, earliest) {
 			earliest = t
 		}
 	}
 	return earliest, nil
 }
 
-// dueSortKey orders tasks by due date (YYYY-MM-DD sorts as a string), with
-// undated tasks last.
-func dueSortKey(t *Task) string {
+// DueDate returns the task's due date as UTC midnight, and false if it has
+// no (parseable) due date.
+func (t *Task) DueDate() (time.Time, bool) {
 	if t.Due == nil || t.Due.Date == "" {
-		return "9999-99-99"
+		return time.Time{}, false
 	}
-	return t.Due.Date
+	due, err := time.Parse("2006-01-02", t.Due.Date)
+	return due, err == nil
+}
+
+// dueBefore reports whether a is due before b, with undated tasks last.
+func dueBefore(a, b *Task) bool {
+	aDue, aOK := a.DueDate()
+	bDue, bOK := b.DueDate()
+	if !aOK || !bOK {
+		return aOK && !bOK
+	}
+	return aDue.Before(bDue)
 }
 
 // createTaskRequest is the POST /tasks body.
@@ -272,14 +283,10 @@ func (c *Client) do(req *http.Request, retry bool) ([]byte, int, error) {
 		httpClient = http.DefaultClient
 	}
 
-	delay := c.RetryDelay
-	if delay == 0 {
-		delay = httpretry.DefaultDelay
-	}
 	var resp *http.Response
 	var err error
 	if retry {
-		resp, err = httpretry.Do(httpClient, req, delay)
+		resp, err = httpretry.Do(httpClient, req, c.RetryDelay)
 	} else {
 		resp, err = httpClient.Do(req)
 	}

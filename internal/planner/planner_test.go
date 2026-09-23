@@ -95,7 +95,7 @@ func TestPlan_MowDay(t *testing.T) {
 			want: "2026-09-26",
 		},
 		{
-			name: "a dry day straight after a rainy one is not a Good Mowing Day",
+			name: "a day under the threshold straight after a rainy one is not a Good Mowing Day",
 			rain: []float64{0, 90, 0, 0, 0, 0, 0, 0},
 			want: "2026-09-22",
 		},
@@ -127,6 +127,30 @@ func TestPlan_MowDay(t *testing.T) {
 			lastMow: "2026-09-18",
 			rain:    []float64{0, 90, 90, 90, 0, 0, 0, 0},
 			want:    "2026-09-27",
+		},
+		{
+			// Last Mow 09-15, Ideal 9: the Minimum Interval ended on 09-20
+			// (already passed) and the Target Date is 09-24.
+			name:      "going back stops at today, even when the Minimum Interval has passed",
+			lastMow:   "2026-09-15",
+			idealDays: 9,
+			rain:      []float64{0, 90, 90, 0, 0, 0, 0, 0},
+			want:      "2026-09-22",
+		},
+		{
+			// Last Mow 09-10: the Target Date (09-17) has already passed.
+			name:    "a passed Target Date with no good day falls back to today",
+			lastMow: "2026-09-10",
+			rain:    []float64{90, 90, 90, 90, 90, 90, 90, 90},
+			want:    "2026-09-22",
+		},
+		{
+			// Last Mow 09-15: the Target Date is today. Yesterday isn't in
+			// the forecast.
+			name:    "the day before today counts as dry",
+			lastMow: "2026-09-15",
+			rain:    []float64{0, 90, 90, 90, 90, 90, 90, 90},
+			want:    "2026-09-22",
 		},
 		{
 			name:      "no Last Mow means the first good day from today",

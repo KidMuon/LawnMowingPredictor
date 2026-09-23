@@ -132,8 +132,8 @@ func TestGetDailyForecast_ReportsTheLawnsTimezone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetDailyForecast() error = %v", err)
 	}
-	if got := forecast.Location.String(); got != "America/New_York" {
-		t.Errorf("Location = %q, want America/New_York", got)
+	if got := forecast.TimeZone.String(); got != "America/New_York" {
+		t.Errorf("TimeZone = %q, want America/New_York", got)
 	}
 }
 
