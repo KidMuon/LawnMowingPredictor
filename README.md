@@ -12,27 +12,52 @@ a new one, so it won't pile up duplicates.
 
 ## How the decision works
 
+The terms below (Last Mow, Target Date, Planned Mow, ...) are defined in
+[`CONTEXT.md`](CONTEXT.md).
+
 1. Fetch the daily forecast (today + next 7 days) from [OpenWeatherMap's
    One Call API 3.0](https://openweathermap.org/api/one-call-3) for your
-   configured coordinates.
-2. Look up the most recently **completed** Todoist task carrying your
-   configured label, searching back up to `completed_lookback_days`. If
-   none is found, today counts as eligible immediately.
-3. Compute the earliest eligible date: `last mow date + min_days_between_mows`
-   (or today, if that's later, or if there's no mowing history).
-4. Starting from the earliest eligible date, walk the forecast and pick the
-   **first** day whose chance of rain is at or under
-   `rain_probability_threshold_percent`. This favors mowing sooner rather
-   than holding out for the single driest day in the window.
-5. If a day is found, check whether an **open** (incomplete) task with the
-   label is already due today or later. If so, do nothing - it's already
-   scheduled. Otherwise, create a new Todoist task due on the chosen date.
-6. If no day in the forecast qualifies, nothing is created; just re-run it
-   again later (e.g. on the next scheduled run) once the forecast has
-   moved forward.
+   configured coordinates, along with the location's timezone.
+2. Find the **Last Mow**: the most recently **completed** Todoist task
+   carrying your configured label, searching back up to
+   `completed_lookback_days`. Its date is the day you ticked it off, in the
+   lawn's local timezone.
+3. The **Target Date** is the Last Mow + `ideal_days_between_mows`, or
+   today if that has passed (or there's no mowing history).
+4. A **good mowing day** has a chance of rain at or under
+   `rain_probability_threshold_percent`, on the day itself *and* on the day
+   before, so the grass has had a chance to dry out. For today, yesterday
+   counts as dry.
+5. Pick the **Mow Day**:
+   - the Target Date, if it's a good mowing day;
+   - otherwise the nearest good day before it, going back no further than
+     the Last Mow + `min_days_between_mows` (and never before today);
+   - otherwise the first good day after it in the forecast;
+   - otherwise (nothing good, or the Target Date is beyond the forecast)
+     the Target Date itself.
+6. Look for the **Scheduled Mow**: any open task with the label, overdue or
+   not.
+   - None: create one due on the Mow Day.
+   - One the app created, still on the date it chose (a **Planned Mow**):
+     move it to the Mow Day if that has changed.
+   - Anything else - a task you created, or one of the app's that you moved
+     to another day (a **Pinned Mow**): leave it alone.
 
-All of this logic lives in `internal/planner`, which has no knowledge of
-HTTP/Todoist/weather APIs and is fully unit tested.
+The app tells the two apart by the `lawnmower-planned: YYYY-MM-DD` line it
+writes into each task's description (see
+[ADR 0001](docs/adr/0001-planned-vs-pinned-via-description-marker.md)).
+Delete that line to take a task over yourself.
+
+Because the Planned Mow is re-planned on every run, it follows the
+forecast: a task appears the day after you mow, and its date settles as the
+forecast reaches it.
+
+Temporary errors (5xx responses) from Todoist or OpenWeatherMap are
+retried a few times within a run; anything else fails the run, and the
+next one catches up.
+
+All of the scheduling logic lives in `internal/planner`, which has no
+knowledge of HTTP/Todoist/weather APIs and is fully unit tested.
 
 ## Setup
 
@@ -102,15 +127,18 @@ go build -o lawnmower ./cmd/lawnmower
 ```
 
 Every setting in `config.yaml` can also be overridden with an environment
-variable (handy for cron/CI), e.g. `LAWNMOWER_MIN_DAYS_BETWEEN_MOWS=10`,
+variable (handy for cron/CI), e.g. `LAWNMOWER_MIN_DAYS_BETWEEN_MOWS=5`,
+`LAWNMOWER_IDEAL_DAYS_BETWEEN_MOWS=10`,
 `LAWNMOWER_RAIN_THRESHOLD_PERCENT=25`, `LAWNMOWER_TODOIST_LABEL=yardwork`.
 See `internal/config/config.go` for the full list.
 
 ## Scheduling
 
-Run it once a day; it's a no-op most days (nothing new to schedule, or
-something's already scheduled) and only creates a task when it finds a
-good day within a currently-eligible window.
+Run it once a day. Most days it either does nothing or moves its own task
+as the forecast changes.
+
+There's no off-season handling: in winter, turn the cron job or timer off
+yourself (and back on in spring), or it will keep scheduling mows.
 
 ### cron
 

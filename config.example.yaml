@@ -17,12 +17,17 @@ location:
   units: imperial
 
 schedule:
-  # Minimum number of days that must pass between the last completed mow
-  # and the next one this app will schedule.
-  min_days_between_mows: 7
-  # Maximum acceptable chance of rain (0-100) for a day to be considered
-  # safe to mow. The app picks the *first* eligible day at or under this
-  # threshold, not necessarily the driest day in the forecast.
+  # The Minimum Interval: the fewest days after your last mow that a new
+  # one may be scheduled. Mowing any sooner would be wasted effort.
+  min_days_between_mows: 5
+  # The Ideal Interval: how many days after your last mow you'd like to
+  # mow again (the Target Date). If the Target Date is rainy, the app looks
+  # back day by day towards the Minimum Interval for a good day, and failing
+  # that, forward. Leave it out to make it the same as the minimum.
+  ideal_days_between_mows: 7
+  # Maximum acceptable chance of rain (0-100). A good mowing day is at or
+  # under this on the day itself and on the day before, so the grass has
+  # had a chance to dry out.
   rain_probability_threshold_percent: 30
   # How far back (in days) to search your Todoist completed-task history
   # to find the last mow. If nothing turns up in this window, the app

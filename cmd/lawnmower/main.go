@@ -21,6 +21,9 @@ import (
 	"log"
 	"os"
 	"time"
+	// Embeds timezone data so the lawn's timezone resolves even on hosts
+	// without a system tz database.
+	_ "time/tzdata"
 
 	"github.com/KidMuon/LawnMowingPredictor/internal/config"
 	"github.com/KidMuon/LawnMowingPredictor/internal/planner"
@@ -68,72 +71,93 @@ func main() {
 
 func run(ctx context.Context, cfg *config.Config, dryRun bool) error {
 	wc := weather.NewClient(cfg.Secrets.OpenWeatherAPIKey, cfg.Location.Units)
-	days, err := wc.GetDailyForecast(ctx, cfg.Location.Latitude, cfg.Location.Longitude)
+	forecast, err := wc.GetDailyForecast(ctx, cfg.Location.Latitude, cfg.Location.Longitude)
 	if err != nil {
 		return fmt.Errorf("fetching forecast: %w", err)
 	}
-	if len(days) == 0 {
+	if len(forecast.Days) == 0 {
 		return fmt.Errorf("forecast returned no daily data")
 	}
 
 	// One Call 3.0's daily[0] is always the forecast location's "today".
-	today := days[0].Date
+	today := forecast.Days[0].Date
 
 	tc := todoist.NewClient(cfg.Secrets.TodoistAPIToken)
 
 	lookback := time.Duration(cfg.Schedule.CompletedLookbackDays) * 24 * time.Hour
-	lastMow, err := tc.FindLatestCompletedByLabel(ctx, cfg.Todoist.Label, lookback)
+	lastMow, err := tc.FindLatestCompletedByLabel(ctx, cfg.Todoist.Label, lookback, forecast.TimeZone)
 	if err != nil {
 		return fmt.Errorf("looking up last completed mow: %w", err)
 	}
-
-	earliest := planner.EarliestEligibleDate(today, lastMow, cfg.Schedule.MinDaysBetweenMows)
 	if lastMow != nil {
-		log.Printf("last completed mow: %s (next eligible on/after %s)", lastMow.Format("2006-01-02"), earliest.Format("2006-01-02"))
+		log.Printf("last mow: %s", lastMow.Format("2006-01-02"))
 	} else {
-		log.Printf("no completed mow found in the last %d days (next eligible on/after %s)", cfg.Schedule.CompletedLookbackDays, earliest.Format("2006-01-02"))
+		log.Printf("no completed mow found in the last %d days", cfg.Schedule.CompletedLookbackDays)
 	}
 
-	forecastDays := make([]planner.ForecastDay, 0, len(days))
-	for _, d := range days {
-		forecastDays = append(forecastDays, planner.ForecastDay{
-			Date:                   d.Date,
-			RainProbabilityPercent: d.RainProbabilityPercent,
-		})
-	}
-
-	chosen, ok := planner.ChooseMowDate(forecastDays, earliest, cfg.Schedule.RainProbabilityThresholdPercent)
-	if !ok {
-		log.Printf("no day in the %d-day forecast (from %s) is both on/after %s and at/under %.0f%% chance of rain; nothing scheduled this run",
-			len(days), today.Format("2006-01-02"), earliest.Format("2006-01-02"), cfg.Schedule.RainProbabilityThresholdPercent)
-		return nil
-	}
-	log.Printf("chosen mow date: %s (%.0f%% chance of rain)", chosen.Date.Format("2006-01-02"), chosen.RainProbabilityPercent)
-
-	existing, err := tc.FindOpenFutureTaskByLabel(ctx, cfg.Todoist.Label, today)
+	existing, err := tc.FindScheduledMow(ctx, cfg.Todoist.Label)
 	if err != nil {
-		return fmt.Errorf("checking for an already-scheduled mow: %w", err)
+		return fmt.Errorf("looking up the scheduled mow: %w", err)
+	}
+
+	in := planner.Input{
+		Today:                today,
+		LastMow:              lastMow,
+		MinIntervalDays:      cfg.Schedule.MinDaysBetweenMows,
+		IdealIntervalDays:    cfg.Schedule.IdealDaysBetweenMows,
+		RainThresholdPercent: cfg.Schedule.RainProbabilityThresholdPercent,
+	}
+	for _, d := range forecast.Days {
+		in.Forecast = append(in.Forecast, planner.ForecastDay{Date: d.Date, RainProbabilityPercent: d.RainProbabilityPercent})
 	}
 	if existing != nil {
-		due := "unknown date"
-		if existing.Due != nil {
-			due = existing.Due.Date
-		}
-		log.Printf("an open mow task already exists (id=%s, due=%s); not creating another", existing.ID, due)
-		return nil
+		// A missing due date leaves Due zero, which never matches a
+		// marker, so the task is treated as Pinned.
+		due, _ := existing.DueDate()
+		in.Scheduled = &planner.ScheduledMow{Due: due, Description: existing.Description}
 	}
 
+	decision := planner.Plan(in)
+	day := decision.Date.Format("2006-01-02")
+	prefix := ""
 	if dryRun {
-		log.Printf("[dry-run] would create Todoist task %q due %s with label %q", cfg.Todoist.TaskContent, chosen.Date.Format("2006-01-02"), cfg.Todoist.Label)
+		prefix = "[dry-run] would have "
+	}
+
+	switch decision.Action {
+	case planner.ActionNone:
+		if existing != nil {
+			log.Printf("mow task already scheduled (id=%s, due=%s); leaving it as is", existing.ID, dueString(existing))
+		}
+		return nil
+
+	case planner.ActionCreate:
+		if !dryRun {
+			task, err := tc.CreateTask(ctx, cfg.Todoist.TaskContent, decision.Description, decision.Date, cfg.Todoist.Label, cfg.Todoist.ProjectID)
+			if err != nil {
+				return fmt.Errorf("creating Todoist task: %w", err)
+			}
+			log.Printf("created mow task id=%s due=%s", task.ID, day)
+			return nil
+		}
+		log.Printf("%screated mow task %q due %s with label %q", prefix, cfg.Todoist.TaskContent, day, cfg.Todoist.Label)
+		return nil
+
+	case planner.ActionMove:
+		if !dryRun {
+			if _, err := tc.MoveTask(ctx, existing.ID, decision.Date, decision.Description); err != nil {
+				return fmt.Errorf("moving Todoist task %s: %w", existing.ID, err)
+			}
+		}
+		log.Printf("%smoved mow task id=%s from %s to %s", prefix, existing.ID, dueString(existing), day)
 		return nil
 	}
+	return fmt.Errorf("unknown planner action %v", decision.Action)
+}
 
-	description := fmt.Sprintf("Scheduled automatically: %.0f%% chance of rain forecast for %s.", chosen.RainProbabilityPercent, chosen.Date.Format("2006-01-02"))
-	task, err := tc.CreateTask(ctx, cfg.Todoist.TaskContent, description, chosen.Date, cfg.Todoist.Label, cfg.Todoist.ProjectID)
-	if err != nil {
-		return fmt.Errorf("creating Todoist task: %w", err)
+func dueString(t *todoist.Task) string {
+	if due, ok := t.DueDate(); ok {
+		return due.Format("2006-01-02")
 	}
-
-	log.Printf("created Todoist task id=%s due=%s", task.ID, chosen.Date.Format("2006-01-02"))
-	return nil
+	return "no date"
 }

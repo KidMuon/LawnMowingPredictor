@@ -50,7 +50,7 @@ func TestFindLatestCompletedByLabel(t *testing.T) {
 	c := NewClient("test-token")
 	c.BaseURL = server.URL
 
-	got, err := c.FindLatestCompletedByLabel(context.Background(), "lawn-mowing", 90*24*time.Hour)
+	got, err := c.FindLatestCompletedByLabel(context.Background(), "lawn-mowing", 90*24*time.Hour, time.UTC)
 	if err != nil {
 		t.Fatalf("FindLatestCompletedByLabel() error = %v", err)
 	}
@@ -76,7 +76,7 @@ func TestFindLatestCompletedByLabel_NoMatches(t *testing.T) {
 	c := NewClient("test-token")
 	c.BaseURL = server.URL
 
-	got, err := c.FindLatestCompletedByLabel(context.Background(), "lawn-mowing", 90*24*time.Hour)
+	got, err := c.FindLatestCompletedByLabel(context.Background(), "lawn-mowing", 90*24*time.Hour, time.UTC)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -85,46 +85,39 @@ func TestFindLatestCompletedByLabel_NoMatches(t *testing.T) {
 	}
 }
 
-func TestFindOpenFutureTaskByLabel(t *testing.T) {
+func TestFindScheduledMow(t *testing.T) {
 	tests := []struct {
-		name      string
-		tasks     []Task
-		onOrAfter time.Time
-		wantFound bool
-		wantID    string
+		name   string
+		tasks  []Task
+		wantID string // "" means none
 	}{
 		{
-			name: "finds a future task with the label",
+			name: "finds the open task with the label",
 			tasks: []Task{
-				{ID: "10", Labels: []string{"other"}, Due: &Due{Date: "2026-09-30"}},
+				{ID: "10", Labels: []string{"other"}, Due: &Due{Date: "2026-09-20"}},
 				{ID: "11", Labels: []string{"lawn-mowing"}, Due: &Due{Date: "2026-09-28"}},
 			},
-			onOrAfter: time.Date(2026, 9, 22, 0, 0, 0, 0, time.UTC),
-			wantFound: true,
-			wantID:    "11",
+			wantID: "11",
 		},
 		{
-			name: "ignores a labeled task due before onOrAfter",
+			name: "an overdue task still counts",
 			tasks: []Task{
 				{ID: "12", Labels: []string{"lawn-mowing"}, Due: &Due{Date: "2026-09-01"}},
 			},
-			onOrAfter: time.Date(2026, 9, 22, 0, 0, 0, 0, time.UTC),
-			wantFound: false,
+			wantID: "12",
 		},
 		{
-			name: "matches a task due exactly today",
+			name: "with several, the earliest due wins",
 			tasks: []Task{
-				{ID: "13", Labels: []string{"lawn-mowing"}, Due: &Due{Date: "2026-09-22"}},
+				{ID: "13", Labels: []string{"lawn-mowing"}},
+				{ID: "14", Labels: []string{"lawn-mowing"}, Due: &Due{Date: "2026-09-28"}},
+				{ID: "15", Labels: []string{"lawn-mowing"}, Due: &Due{Date: "2026-09-25"}},
 			},
-			onOrAfter: time.Date(2026, 9, 22, 0, 0, 0, 0, time.UTC),
-			wantFound: true,
-			wantID:    "13",
+			wantID: "15",
 		},
 		{
-			name:      "no tasks at all",
-			tasks:     nil,
-			onOrAfter: time.Date(2026, 9, 22, 0, 0, 0, 0, time.UTC),
-			wantFound: false,
+			name:  "no tasks at all",
+			tasks: nil,
 		},
 	}
 
@@ -142,17 +135,16 @@ func TestFindOpenFutureTaskByLabel(t *testing.T) {
 			c := NewClient("test-token")
 			c.BaseURL = server.URL
 
-			got, err := c.FindOpenFutureTaskByLabel(context.Background(), "lawn-mowing", tc.onOrAfter)
+			got, err := c.FindScheduledMow(context.Background(), "lawn-mowing")
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if tc.wantFound && got == nil {
-				t.Fatalf("expected a task, got nil")
-			}
-			if !tc.wantFound && got != nil {
+			switch {
+			case tc.wantID == "" && got != nil:
 				t.Fatalf("expected no task, got %+v", got)
-			}
-			if tc.wantFound && got.ID != tc.wantID {
+			case tc.wantID != "" && got == nil:
+				t.Fatalf("expected task %s, got nil", tc.wantID)
+			case tc.wantID != "" && got.ID != tc.wantID:
 				t.Errorf("got ID %q, want %q", got.ID, tc.wantID)
 			}
 		})
@@ -231,8 +223,141 @@ func TestCreateTask_HTTPError(t *testing.T) {
 
 func TestNoTokenConfigured(t *testing.T) {
 	c := NewClient("")
-	_, err := c.FindOpenFutureTaskByLabel(context.Background(), "lawn-mowing", time.Now())
+	_, err := c.FindScheduledMow(context.Background(), "lawn-mowing")
 	if err == nil {
 		t.Fatalf("expected error for missing token")
+	}
+}
+
+func TestFindLatestCompletedByLabel_UsesTheLawnsLocalDate(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(pagedTasksResponse{Results: []Task{
+			// 21:30 on 09-22 in New York is already 09-23 in UTC.
+			{ID: "1", Labels: []string{"lawn-mowing"}, CompletedAt: "2026-09-23T01:30:00Z"},
+		}})
+	}))
+	defer server.Close()
+	c := NewClient("test-token")
+	c.BaseURL = server.URL
+	newYork, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatalf("loading timezone: %v", err)
+	}
+
+	got, err := c.FindLatestCompletedByLabel(context.Background(), "lawn-mowing", 90*24*time.Hour, newYork)
+	if err != nil {
+		t.Fatalf("FindLatestCompletedByLabel() error = %v", err)
+	}
+	if want := time.Date(2026, 9, 22, 0, 0, 0, 0, time.UTC); got == nil || !got.Equal(want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestMoveTask(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/tasks/42" {
+			t.Errorf("request = %s %s, want POST /tasks/42", r.Method, r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
+			t.Errorf("Authorization header = %q", got)
+		}
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decoding request body: %v", err)
+		}
+		if body["due_date"] != "2026-09-25" {
+			t.Errorf("due_date = %q, want 2026-09-25", body["due_date"])
+		}
+		if body["description"] != "new description" {
+			t.Errorf("description = %q, want %q", body["description"], "new description")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id": "42", "due": {"date": "2026-09-25"}}`))
+	}))
+	defer server.Close()
+	c := NewClient("test-token")
+	c.BaseURL = server.URL
+
+	task, err := c.MoveTask(context.Background(), "42", time.Date(2026, 9, 25, 0, 0, 0, 0, time.UTC), "new description")
+	if err != nil {
+		t.Fatalf("MoveTask() error = %v", err)
+	}
+	if task.Due == nil || task.Due.Date != "2026-09-25" {
+		t.Errorf("returned task due = %+v, want 2026-09-25", task.Due)
+	}
+}
+
+func TestRetriesATemporaryServerError(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		json.NewEncoder(w).Encode(pagedTasksResponse{Results: []Task{
+			{ID: "7", Labels: []string{"lawn-mowing"}, Due: &Due{Date: "2026-09-25"}},
+		}})
+	}))
+	defer server.Close()
+	c := NewClient("test-token")
+	c.BaseURL = server.URL
+	c.RetryDelay = time.Millisecond
+
+	got, err := c.FindScheduledMow(context.Background(), "lawn-mowing")
+	if err != nil {
+		t.Fatalf("FindScheduledMow() error = %v", err)
+	}
+	if got == nil || got.ID != "7" {
+		t.Errorf("got %+v, want task 7", got)
+	}
+}
+
+func TestRetriesResendTheRequestBody(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		body, _ := io.ReadAll(r.Body)
+		if calls == 1 {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		if len(body) == 0 {
+			t.Errorf("retried request had an empty body")
+		}
+		w.Write([]byte(`{"id": "9"}`))
+	}))
+	defer server.Close()
+	c := NewClient("test-token")
+	c.BaseURL = server.URL
+	c.RetryDelay = time.Millisecond
+
+	task, err := c.MoveTask(context.Background(), "9", time.Now(), "description")
+	if err != nil {
+		t.Fatalf("MoveTask() error = %v", err)
+	}
+	if task.ID != "9" {
+		t.Errorf("task ID = %q, want 9", task.ID)
+	}
+}
+
+func TestCreateTaskIsNeverRetried(t *testing.T) {
+	// Todoist may have created the task before failing; a retry could
+	// create a second Scheduled Mow. The next run finds it instead.
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	c := NewClient("test-token")
+	c.BaseURL = server.URL
+	c.RetryDelay = time.Millisecond
+
+	if _, err := c.CreateTask(context.Background(), "Mow the lawn", "", time.Now(), "lawn-mowing", ""); err == nil {
+		t.Fatalf("expected an error for a 503 response")
+	}
+	if calls != 1 {
+		t.Errorf("POST /tasks was sent %d times, want 1", calls)
 	}
 }

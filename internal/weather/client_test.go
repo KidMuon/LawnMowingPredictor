@@ -62,10 +62,11 @@ func TestGetDailyForecast(t *testing.T) {
 	c := NewClient("test-key", "imperial")
 	c.BaseURL = server.URL
 
-	days, err := c.GetDailyForecast(context.Background(), 39.7392, -104.9903)
+	forecast, err := c.GetDailyForecast(context.Background(), 39.7392, -104.9903)
 	if err != nil {
 		t.Fatalf("GetDailyForecast() error = %v", err)
 	}
+	days := forecast.Days
 	if len(days) != 2 {
 		t.Fatalf("got %d days, want 2", len(days))
 	}
@@ -109,5 +110,53 @@ func TestGetDailyForecast_HTTPError(t *testing.T) {
 	_, err := c.GetDailyForecast(context.Background(), 39.7392, -104.9903)
 	if err == nil {
 		t.Fatalf("expected error for 401 response")
+	}
+}
+
+func serveJSON(t *testing.T, body string) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(body))
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+func TestGetDailyForecast_ReportsTheLawnsTimezone(t *testing.T) {
+	server := serveJSON(t, `{"timezone": "America/New_York", "timezone_offset": -14400, "daily": []}`)
+	c := NewClient("test-key", "imperial")
+	c.BaseURL = server.URL
+
+	forecast, err := c.GetDailyForecast(context.Background(), 40.7, -74)
+	if err != nil {
+		t.Fatalf("GetDailyForecast() error = %v", err)
+	}
+	if got := forecast.TimeZone.String(); got != "America/New_York" {
+		t.Errorf("TimeZone = %q, want America/New_York", got)
+	}
+}
+
+func TestGetDailyForecast_RetriesATemporaryServerError(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.Write([]byte(`{"timezone": "America/New_York", "daily": [{"dt": 1790000000, "pop": 0.1}]}`))
+	}))
+	defer server.Close()
+	c := NewClient("test-key", "imperial")
+	c.BaseURL = server.URL
+	c.RetryDelay = time.Millisecond
+
+	forecast, err := c.GetDailyForecast(context.Background(), 40.7, -74)
+	if err != nil {
+		t.Fatalf("GetDailyForecast() error = %v", err)
+	}
+	if len(forecast.Days) != 1 {
+		t.Errorf("got %d days, want 1", len(forecast.Days))
 	}
 }
