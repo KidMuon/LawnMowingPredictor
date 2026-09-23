@@ -332,11 +332,32 @@ func TestRetriesResendTheRequestBody(t *testing.T) {
 	c.BaseURL = server.URL
 	c.RetryDelay = time.Millisecond
 
-	task, err := c.CreateTask(context.Background(), "Mow the lawn", "", time.Now(), "lawn-mowing", "")
+	task, err := c.MoveTask(context.Background(), "9", time.Now(), "description")
 	if err != nil {
-		t.Fatalf("CreateTask() error = %v", err)
+		t.Fatalf("MoveTask() error = %v", err)
 	}
 	if task.ID != "9" {
 		t.Errorf("task ID = %q, want 9", task.ID)
+	}
+}
+
+func TestCreateTaskIsNeverRetried(t *testing.T) {
+	// Todoist may have created the task before failing; a retry could
+	// create a second Scheduled Mow. The next run finds it instead.
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	c := NewClient("test-token")
+	c.BaseURL = server.URL
+	c.RetryDelay = time.Millisecond
+
+	if _, err := c.CreateTask(context.Background(), "Mow the lawn", "", time.Now(), "lawn-mowing", ""); err == nil {
+		t.Fatalf("expected an error for a 503 response")
+	}
+	if calls != 1 {
+		t.Errorf("POST /tasks was sent %d times, want 1", calls)
 	}
 }

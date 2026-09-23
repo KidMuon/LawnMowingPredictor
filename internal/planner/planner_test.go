@@ -254,3 +254,24 @@ func TestPlan_NeverTouchesAPinnedMow(t *testing.T) {
 		})
 	}
 }
+
+func TestPlan_MovingAPlannedMowKeepsTheOwnersNotes(t *testing.T) {
+	in := baseInput()
+	in.Forecast = week("2026-09-22", 0, 0, 0, 0, 0, 0, 0, 0)
+	created := Plan(in) // 09-24
+
+	notes := "Borrow the neighbour's trimmer.\nDo the back verge too."
+	in.Scheduled = &ScheduledMow{Due: created.Date, Description: notes + "\n\n" + created.Description}
+	in.Forecast = week("2026-09-22", 0, 0, 90, 0, 0, 0, 0, 0)
+	got := Plan(in)
+
+	if got.Action != ActionMove {
+		t.Fatalf("Action = %v, want move", got.Action)
+	}
+	want := notes + "\n\n" +
+		"Planned automatically: 0% chance of rain forecast for 2026-09-23.\n\n" +
+		"lawnmower-planned: 2026-09-23"
+	if got.Description != want {
+		t.Errorf("Description =\n%s\nwant\n%s", got.Description, want)
+	}
+}

@@ -8,6 +8,7 @@ package planner
 import (
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
 )
 
@@ -67,8 +68,27 @@ func Plan(in Input) Decision {
 			return Decision{Action: ActionNone}
 		}
 		d.Action = ActionMove
+		if notes := ownerNotes(in.Scheduled.Description); notes != "" {
+			d.Description = notes + "\n\n" + d.Description
+		}
 	}
 	return d
+}
+
+// appLine matches the lines the app writes into a Planned Mow's
+// description: the summary and the marker.
+var appLine = regexp.MustCompile(`^(Planned automatically[ :].*|lawnmower-planned: .*)$`)
+
+// ownerNotes returns description without the app's own lines, so moving
+// a Planned Mow keeps anything the owner added.
+func ownerNotes(description string) string {
+	var kept []string
+	for _, line := range strings.Split(description, "\n") {
+		if !appLine.MatchString(line) {
+			kept = append(kept, line)
+		}
+	}
+	return strings.TrimSpace(strings.Join(kept, "\n"))
 }
 
 // isPlanned reports whether s is a Planned Mow: its marker is present and

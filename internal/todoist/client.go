@@ -168,7 +168,9 @@ func (c *Client) CreateTask(ctx context.Context, content, description string, du
 		Labels:      []string{label},
 		DueDate:     dueDate.Format("2006-01-02"),
 	}
-	return c.postTask(ctx, "/tasks", body)
+	// Never retried: Todoist may have created the task before failing, and
+	// a retry would make a second Scheduled Mow. The next run finds it.
+	return c.postTask(ctx, "/tasks", body, false)
 }
 
 // moveTaskRequest is the POST /tasks/{id} body.
@@ -183,11 +185,12 @@ func (c *Client) MoveTask(ctx context.Context, id string, dueDate time.Time, des
 		Description: description,
 		DueDate:     dueDate.Format("2006-01-02"),
 	}
-	return c.postTask(ctx, "/tasks/"+url.PathEscape(id), body)
+	return c.postTask(ctx, "/tasks/"+url.PathEscape(id), body, true)
 }
 
-// postTask POSTs body as JSON to path and parses the task it returns.
-func (c *Client) postTask(ctx context.Context, path string, body any) (*Task, error) {
+// postTask POSTs body as JSON to path and parses the task it returns. It
+// retries temporary server errors only if retry is true.
+func (c *Client) postTask(ctx context.Context, path string, body any, retry bool) (*Task, error) {
 	payload, err := json.Marshal(body)
 	if err != nil {
 		return nil, fmt.Errorf("todoist: encoding POST %s request: %w", path, err)
@@ -200,7 +203,7 @@ func (c *Client) postTask(ctx context.Context, path string, body any) (*Task, er
 	req.Header.Set("Authorization", "Bearer "+c.Token)
 	req.Header.Set("Content-Type", "application/json")
 
-	respBody, status, err := c.do(req)
+	respBody, status, err := c.do(req, retry)
 	if err != nil {
 		return nil, err
 	}
@@ -240,7 +243,7 @@ func (c *Client) listTasksPaged(ctx context.Context, path string, query url.Valu
 		}
 		req.Header.Set("Authorization", "Bearer "+c.Token)
 
-		body, status, err := c.do(req)
+		body, status, err := c.do(req, true)
 		if err != nil {
 			return nil, err
 		}
@@ -262,7 +265,8 @@ func (c *Client) listTasksPaged(ctx context.Context, path string, query url.Valu
 	return all, nil
 }
 
-func (c *Client) do(req *http.Request) ([]byte, int, error) {
+// do sends req, retrying temporary server errors if retry is true.
+func (c *Client) do(req *http.Request, retry bool) ([]byte, int, error) {
 	httpClient := c.HTTPClient
 	if httpClient == nil {
 		httpClient = http.DefaultClient
@@ -272,7 +276,13 @@ func (c *Client) do(req *http.Request) ([]byte, int, error) {
 	if delay == 0 {
 		delay = httpretry.DefaultDelay
 	}
-	resp, err := httpretry.Do(httpClient, req, delay)
+	var resp *http.Response
+	var err error
+	if retry {
+		resp, err = httpretry.Do(httpClient, req, delay)
+	} else {
+		resp, err = httpClient.Do(req)
+	}
 	if err != nil {
 		return nil, 0, fmt.Errorf("todoist: request failed: %w", err)
 	}
