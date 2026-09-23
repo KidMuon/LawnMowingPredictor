@@ -229,3 +229,71 @@ func TestLoadEnvFile_MissingExplicitIsAnError(t *testing.T) {
 		t.Fatalf("expected error for a missing explicitly-requested .env file")
 	}
 }
+
+func writeConfig(t *testing.T, contents string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatalf("writing test config: %v", err)
+	}
+	return path
+}
+
+func TestLoad_IdealInterval(t *testing.T) {
+	minimalSecrets(t)
+	path := writeConfig(t, `
+schedule:
+  min_days_between_mows: 5
+  ideal_days_between_mows: 8
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Schedule.IdealDaysBetweenMows != 8 {
+		t.Errorf("ideal_days_between_mows = %d, want 8", cfg.Schedule.IdealDaysBetweenMows)
+	}
+}
+
+func TestLoad_IdealIntervalDefaultsToTheMinimum(t *testing.T) {
+	minimalSecrets(t)
+	path := writeConfig(t, `
+schedule:
+  min_days_between_mows: 10
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Schedule.IdealDaysBetweenMows != 10 {
+		t.Errorf("ideal_days_between_mows = %d, want 10", cfg.Schedule.IdealDaysBetweenMows)
+	}
+}
+
+func TestLoad_MinimumAfterIdealIsAnError(t *testing.T) {
+	minimalSecrets(t)
+	path := writeConfig(t, `
+schedule:
+  min_days_between_mows: 10
+  ideal_days_between_mows: 7
+`)
+
+	if _, err := Load(path); err == nil {
+		t.Fatalf("expected validation error when the minimum is larger than the ideal")
+	}
+}
+
+func TestLoad_IdealIntervalEnvOverride(t *testing.T) {
+	minimalSecrets(t)
+	withEnv(t, map[string]string{"LAWNMOWER_IDEAL_DAYS_BETWEEN_MOWS": "12"})
+
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Schedule.IdealDaysBetweenMows != 12 {
+		t.Errorf("ideal_days_between_mows = %d, want 12", cfg.Schedule.IdealDaysBetweenMows)
+	}
+}

@@ -13,6 +13,8 @@ import (
 	"net/url"
 	"strconv"
 	"time"
+
+	"github.com/KidMuon/LawnMowingPredictor/internal/httpretry"
 )
 
 const defaultBaseURL = "https://api.openweathermap.org/data/3.0/onecall"
@@ -27,6 +29,9 @@ type Client struct {
 	// BaseURL overrides the API endpoint; used by tests. Defaults to
 	// OpenWeatherMap's production One Call 3.0 endpoint.
 	BaseURL string
+	// RetryDelay is the wait between retries of a temporary server
+	// error. Defaults to httpretry.DefaultDelay.
+	RetryDelay time.Duration
 }
 
 // NewClient returns a Client ready to make requests.
@@ -49,10 +54,19 @@ type Day struct {
 	TempMin                float64
 }
 
+// Forecast is the daily forecast for a location, along with that
+// location's timezone.
+type Forecast struct {
+	// Location is the forecast location's timezone.
+	Location *time.Location
+	Days     []Day
+}
+
 // oneCallResponse mirrors the subset of the One Call 3.0 JSON response this
 // package cares about. See https://openweathermap.org/api/one-call-3 for
 // the full schema.
 type oneCallResponse struct {
+	Timezone       string     `json:"timezone"`
 	TimezoneOffset int        `json:"timezone_offset"`
 	Daily          []dailyRaw `json:"daily"`
 }
@@ -73,7 +87,7 @@ type dailyRaw struct {
 // for the given coordinates. The current, minutely, hourly, and alerts
 // sections are excluded from the request since only the daily forecast is
 // needed.
-func (c *Client) GetDailyForecast(ctx context.Context, lat, lon float64) ([]Day, error) {
+func (c *Client) GetDailyForecast(ctx context.Context, lat, lon float64) (*Forecast, error) {
 	if c.APIKey == "" {
 		return nil, fmt.Errorf("weather: no API key configured")
 	}
@@ -99,7 +113,11 @@ func (c *Client) GetDailyForecast(ctx context.Context, lat, lon float64) ([]Day,
 		httpClient = http.DefaultClient
 	}
 
-	resp, err := httpClient.Do(req)
+	delay := c.RetryDelay
+	if delay == 0 {
+		delay = httpretry.DefaultDelay
+	}
+	resp, err := httpretry.Do(httpClient, req, delay)
 	if err != nil {
 		return nil, fmt.Errorf("weather: request failed: %w", err)
 	}
@@ -143,7 +161,12 @@ func (c *Client) GetDailyForecast(ctx context.Context, lat, lon float64) ([]Day,
 			TempMin:                d.Temp.Min,
 		})
 	}
-	return days, nil
+	loc, err := time.LoadLocation(parsed.Timezone)
+	if err != nil || parsed.Timezone == "" {
+		// Unknown zone name: today's offset is close enough.
+		loc = time.FixedZone(parsed.Timezone, parsed.TimezoneOffset)
+	}
+	return &Forecast{Location: loc, Days: days}, nil
 }
 
 func (c *Client) baseURL() string {

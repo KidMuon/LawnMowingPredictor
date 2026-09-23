@@ -64,9 +64,12 @@ type LocationConfig struct {
 
 // ScheduleConfig controls the mowing-date decision.
 type ScheduleConfig struct {
-	// MinDaysBetweenMows is the minimum number of days that must pass
-	// between the last completed mow and the next scheduled one.
+	// MinDaysBetweenMows is the Minimum Interval: the fewest days after
+	// the Last Mow that a new mow may be scheduled.
 	MinDaysBetweenMows int `yaml:"min_days_between_mows"`
+	// IdealDaysBetweenMows is the Ideal Interval: the Target Date is the
+	// Last Mow plus this many days.
+	IdealDaysBetweenMows int `yaml:"ideal_days_between_mows"`
 	// RainProbabilityThresholdPercent is the maximum acceptable chance of
 	// rain (0-100) for a day to be considered safe to mow.
 	RainProbabilityThresholdPercent float64 `yaml:"rain_probability_threshold_percent"`
@@ -142,6 +145,11 @@ func Load(path string) (*Config, error) {
 	if err := applyEnvOverrides(cfg); err != nil {
 		return nil, err
 	}
+	// Left unset, the Ideal Interval is the Minimum, so a config written
+	// before ideal_days_between_mows existed keeps working.
+	if cfg.Schedule.IdealDaysBetweenMows == 0 {
+		cfg.Schedule.IdealDaysBetweenMows = cfg.Schedule.MinDaysBetweenMows
+	}
 
 	cfg.Secrets.OpenWeatherAPIKey = os.Getenv("OPENWEATHERMAP_API_KEY")
 	cfg.Secrets.TodoistAPIToken = os.Getenv("TODOIST_API_TOKEN")
@@ -192,6 +200,7 @@ func applyEnvOverrides(cfg *Config) error {
 	setString("LAWNMOWER_UNITS", &cfg.Location.Units)
 
 	setInt("LAWNMOWER_MIN_DAYS_BETWEEN_MOWS", &cfg.Schedule.MinDaysBetweenMows)
+	setInt("LAWNMOWER_IDEAL_DAYS_BETWEEN_MOWS", &cfg.Schedule.IdealDaysBetweenMows)
 	setFloat("LAWNMOWER_RAIN_THRESHOLD_PERCENT", &cfg.Schedule.RainProbabilityThresholdPercent)
 	setInt("LAWNMOWER_COMPLETED_LOOKBACK_DAYS", &cfg.Schedule.CompletedLookbackDays)
 
@@ -223,6 +232,9 @@ func (c *Config) Validate() error {
 
 	if c.Schedule.MinDaysBetweenMows < 0 {
 		errs = append(errs, "schedule.min_days_between_mows must be >= 0")
+	}
+	if c.Schedule.MinDaysBetweenMows > c.Schedule.IdealDaysBetweenMows {
+		errs = append(errs, fmt.Sprintf("schedule.min_days_between_mows (%d) must not be larger than schedule.ideal_days_between_mows (%d)", c.Schedule.MinDaysBetweenMows, c.Schedule.IdealDaysBetweenMows))
 	}
 	if c.Schedule.RainProbabilityThresholdPercent < 0 || c.Schedule.RainProbabilityThresholdPercent > 100 {
 		errs = append(errs, fmt.Sprintf("schedule.rain_probability_threshold_percent must be between 0 and 100, got %v", c.Schedule.RainProbabilityThresholdPercent))

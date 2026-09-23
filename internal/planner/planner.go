@@ -1,11 +1,13 @@
-// Package planner contains the pure decision logic for choosing a mowing
-// date: given a weather forecast and mowing history, it decides whether
-// there is a good day to mow, and if so, which one. It has no knowledge of
-// HTTP, Todoist, or OpenWeatherMap and is deliberately easy to unit test.
+// Package planner contains the pure decision logic for scheduling a mow:
+// given the Last Mow, the forecast, and the current Scheduled Mow, it picks
+// the Mow Day and decides whether to create, move, or leave the task. It
+// has no knowledge of HTTP, Todoist, or OpenWeatherMap and is deliberately
+// easy to unit test. Terms follow CONTEXT.md.
 package planner
 
 import (
-	"sort"
+	"fmt"
+	"regexp"
 	"time"
 )
 
@@ -17,49 +19,136 @@ type ForecastDay struct {
 	RainProbabilityPercent float64
 }
 
-// EarliestEligibleDate returns the first calendar date on or after which a
-// new mow may be scheduled, given when the lawn was last mowed (if known)
-// and the configured minimum number of days between mows.
-//
-// If lastMow is nil (no mowing history was found), today is eligible
-// immediately. Otherwise the earliest eligible date is lastMow +
-// minDaysBetweenMows, but never earlier than today.
-func EarliestEligibleDate(today time.Time, lastMow *time.Time, minDaysBetweenMows int) time.Time {
-	today = truncateToDate(today)
-	if lastMow == nil {
-		return today
-	}
+// Action is what Plan decides to do about the Scheduled Mow.
+type Action int
 
-	earliest := truncateToDate(*lastMow).AddDate(0, 0, minDaysBetweenMows)
-	if earliest.Before(today) {
-		return today
-	}
-	return earliest
+const (
+	// ActionNone leaves Todoist as it is.
+	ActionNone Action = iota
+	// ActionCreate creates a new Planned Mow.
+	ActionCreate
+	// ActionMove moves the existing Planned Mow to a new date.
+	ActionMove
+)
+
+// Input is everything Plan needs to decide on the next mow.
+type Input struct {
+	Today                time.Time
+	LastMow              *time.Time
+	Forecast             []ForecastDay
+	MinIntervalDays      int
+	IdealIntervalDays    int
+	RainThresholdPercent float64
+	// Scheduled is the current Scheduled Mow, if there is one.
+	Scheduled *ScheduledMow
 }
 
-// ChooseMowDate scans forecast for the earliest date that is on or after
-// earliestEligible and whose rain probability is at or under
-// thresholdPercent. forecast need not be pre-sorted. It returns the chosen
-// day and true, or a zero ForecastDay and false if no day qualifies (e.g.
-// every eligible day in the forecast is too likely to rain, or the forecast
-// doesn't extend far enough to reach earliestEligible).
-func ChooseMowDate(forecast []ForecastDay, earliestEligible time.Time, thresholdPercent float64) (ForecastDay, bool) {
-	earliestEligible = truncateToDate(earliestEligible)
+// ScheduledMow is an open mowing task, as far as planning cares.
+type ScheduledMow struct {
+	Due         time.Time
+	Description string
+}
 
-	sorted := make([]ForecastDay, len(forecast))
-	copy(sorted, forecast)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Date.Before(sorted[j].Date) })
+// Decision is the outcome of Plan.
+type Decision struct {
+	Action Action
+	Date   time.Time
+	// Description is the task description to write when creating or
+	// moving a Planned Mow.
+	Description string
+}
 
-	for _, day := range sorted {
-		d := truncateToDate(day.Date)
-		if d.Before(earliestEligible) {
-			continue
+// Plan decides whether to create, move, or leave the Scheduled Mow.
+func Plan(in Input) Decision {
+	day, rain, good := mowDay(in)
+	d := Decision{Action: ActionCreate, Date: day, Description: plannedDescription(day, rain, good)}
+	if in.Scheduled != nil {
+		if !isPlanned(*in.Scheduled) || day.Equal(truncateToDate(in.Scheduled.Due)) {
+			return Decision{Action: ActionNone}
 		}
-		if day.RainProbabilityPercent <= thresholdPercent {
-			return ForecastDay{Date: d, RainProbabilityPercent: day.RainProbabilityPercent}, true
+		d.Action = ActionMove
+	}
+	return d
+}
+
+// isPlanned reports whether s is a Planned Mow: its marker is present and
+// still matches its due date. Anything else is a Pinned Mow.
+func isPlanned(s ScheduledMow) bool {
+	m := plannedMarker.FindStringSubmatch(s.Description)
+	return m != nil && m[1] == truncateToDate(s.Due).Format("2006-01-02")
+}
+
+// plannedMarker is written into every Planned Mow's description, recording
+// the date the app chose (see docs/adr/0001).
+var plannedMarker = regexp.MustCompile(`(?m)^lawnmower-planned: (\d{4}-\d{2}-\d{2})$`)
+
+func plannedDescription(day time.Time, rain float64, good bool) string {
+	ymd := day.Format("2006-01-02")
+	summary := fmt.Sprintf("Planned automatically for %s; the forecast doesn't show a good day yet.", ymd)
+	if good {
+		summary = fmt.Sprintf("Planned automatically: %.0f%% chance of rain forecast for %s.", rain, ymd)
+	}
+	return fmt.Sprintf("%s\n\nlawnmower-planned: %s", summary, ymd)
+}
+
+// mowDay picks the Mow Day: the Target Date if it's a Good Mowing Day,
+// otherwise the nearest good day before it, going back no further than the
+// Minimum Interval; otherwise the first good day after it. If none of those
+// is a Good Mowing Day it falls back to the Target Date, and good is false.
+func mowDay(in Input) (day time.Time, rainPercent float64, good bool) {
+	rain := make(map[time.Time]float64, len(in.Forecast))
+	for _, d := range in.Forecast {
+		rain[truncateToDate(d.Date)] = d.RainProbabilityPercent
+	}
+	dry := func(d time.Time) bool {
+		r, ok := rain[d]
+		return ok && r <= in.RainThresholdPercent
+	}
+	today := truncateToDate(in.Today)
+	// A Good Mowing Day needs the day before to be dry too, so the grass
+	// has dried out. Yesterday isn't in the forecast, so it counts as dry.
+	isGood := func(d time.Time) bool {
+		return dry(d) && (d.Equal(today) || dry(d.AddDate(0, 0, -1)))
+	}
+
+	// With no Last Mow, mowing can happen as soon as there's a good day.
+	target, earliest := today, today
+	if in.LastMow != nil {
+		lastMow := truncateToDate(*in.LastMow)
+		target = lastMow.AddDate(0, 0, in.IdealIntervalDays)
+		earliest = lastMow.AddDate(0, 0, in.MinIntervalDays)
+	}
+	// Never plan a mow in the past.
+	target = latest(target, today)
+	earliest = latest(earliest, today)
+	if _, inForecast := rain[target]; !inForecast {
+		// Too far ahead to judge; a later run re-plans once it's in range.
+		return target, 0, false
+	}
+	if isGood(target) {
+		return target, rain[target], true
+	}
+	for d := target.AddDate(0, 0, -1); !d.Before(earliest); d = d.AddDate(0, 0, -1) {
+		if isGood(d) {
+			return d, rain[d], true
 		}
 	}
-	return ForecastDay{}, false
+	for d := target.AddDate(0, 0, 1); ; d = d.AddDate(0, 0, 1) {
+		if _, inForecast := rain[d]; !inForecast {
+			break
+		}
+		if isGood(d) {
+			return d, rain[d], true
+		}
+	}
+	return target, 0, false
+}
+
+func latest(a, b time.Time) time.Time {
+	if a.After(b) {
+		return a
+	}
+	return b
 }
 
 func truncateToDate(t time.Time) time.Time {

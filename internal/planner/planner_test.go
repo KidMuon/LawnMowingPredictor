@@ -1,6 +1,7 @@
 package planner
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -13,124 +14,243 @@ func date(s string) time.Time {
 	return t
 }
 
-func TestEarliestEligibleDate(t *testing.T) {
-	today := date("2026-09-22")
+func ptr(t time.Time) *time.Time { return &t }
 
+// week returns an 8-day forecast starting on start, with the given chances
+// of rain in order.
+func week(start string, rain ...float64) []ForecastDay {
+	days := make([]ForecastDay, len(rain))
+	for i, r := range rain {
+		days[i] = ForecastDay{Date: date(start).AddDate(0, 0, i), RainProbabilityPercent: r}
+	}
+	return days
+}
+
+func baseInput() Input {
+	return Input{
+		Today:                date("2026-09-22"),
+		LastMow:              ptr(date("2026-09-17")),
+		MinIntervalDays:      5,
+		IdealIntervalDays:    7,
+		RainThresholdPercent: 30,
+	}
+}
+
+func TestPlan_CreatesOnTargetDateWhenItIsAGoodMowingDay(t *testing.T) {
+	in := baseInput()
+	// Target Date = 09-17 + 7 = 09-24.
+	in.Forecast = week("2026-09-22", 0, 0, 0, 0, 0, 0, 0, 0)
+
+	got := Plan(in)
+
+	if got.Action != ActionCreate {
+		t.Fatalf("Action = %v, want create", got.Action)
+	}
+	if !got.Date.Equal(date("2026-09-24")) {
+		t.Errorf("Date = %s, want 2026-09-24", got.Date.Format("2006-01-02"))
+	}
+	if want := "Planned automatically: 0% chance of rain forecast for 2026-09-24."; !strings.Contains(got.Description, want) {
+		t.Errorf("Description = %q, want it to contain %q", got.Description, want)
+	}
+}
+
+func TestPlan_DescriptionSaysWhenTheForecastHasNoAnswerYet(t *testing.T) {
+	in := baseInput()
+	in.IdealIntervalDays = 14 // Target Date 10-01, beyond the forecast
+	in.Forecast = week("2026-09-22", 0, 0, 0, 0, 0, 0, 0, 0)
+
+	got := Plan(in)
+
+	if want := "Planned automatically for 2026-10-01; the forecast doesn't show a good day yet."; !strings.Contains(got.Description, want) {
+		t.Errorf("Description = %q, want it to contain %q", got.Description, want)
+	}
+}
+
+// Last Mow 09-17, Minimum 5, Ideal 7: the Minimum Interval ends on 09-22
+// (today) and the Target Date is 09-24.
+func TestPlan_MowDay(t *testing.T) {
 	tests := []struct {
-		name    string
-		lastMow *time.Time
-		minDays int
-		want    time.Time
+		name string
+		// Chance of rain for 09-22 .. 09-29.
+		rain []float64
+		want string
+		// Optional overrides of baseInput.
+		lastMow   string
+		noLastMow bool
+		idealDays int
 	}{
 		{
-			name:    "no history means today is eligible",
-			lastMow: nil,
-			minDays: 7,
-			want:    date("2026-09-22"),
+			name: "rainy Target Date moves to the day before",
+			rain: []float64{0, 0, 90, 0, 0, 0, 0, 0},
+			want: "2026-09-23",
 		},
 		{
-			name:    "recent mow pushes eligibility into the future",
-			lastMow: ptr(date("2026-09-20")),
-			minDays: 7,
-			want:    date("2026-09-27"),
+			name: "keeps going back as far as the Minimum Interval",
+			rain: []float64{0, 90, 90, 0, 0, 0, 0, 0},
+			want: "2026-09-22",
 		},
 		{
-			name:    "old mow clamps to today, never returns a past date",
-			lastMow: ptr(date("2026-06-01")),
-			minDays: 7,
-			want:    date("2026-09-22"),
+			name: "nothing good back to the Minimum Interval, so the first good day after the Target Date",
+			rain: []float64{90, 90, 90, 0, 0, 0, 0, 0},
+			want: "2026-09-26",
 		},
 		{
-			name:    "mow exactly minDays ago is eligible today",
-			lastMow: ptr(date("2026-09-15")),
-			minDays: 7,
-			want:    date("2026-09-22"),
+			name: "a dry day straight after a rainy one is not a Good Mowing Day",
+			rain: []float64{0, 90, 0, 0, 0, 0, 0, 0},
+			want: "2026-09-22",
 		},
 		{
-			name:    "zero-day interval with a mow today is still eligible today",
-			lastMow: ptr(date("2026-09-22")),
-			minDays: 0,
-			want:    date("2026-09-22"),
+			name: "no good day anywhere falls back to the Target Date",
+			rain: []float64{90, 90, 90, 90, 90, 90, 90, 90},
+			want: "2026-09-24",
+		},
+		{
+			// Last Mow 09-10: the Target Date (09-17) has already passed.
+			name:    "a passed Target Date means the first good day from today",
+			lastMow: "2026-09-10",
+			rain:    []float64{90, 0, 0, 0, 0, 0, 0, 0},
+			want:    "2026-09-24",
+		},
+		{
+			// Ideal 14: the Target Date (10-01) is past the end of the
+			// forecast (09-29), so the dry days in the forecast aren't
+			// known to be the nearest good ones.
+			name:      "a Target Date beyond the forecast is used as is",
+			idealDays: 14,
+			rain:      []float64{0, 0, 0, 0, 0, 0, 0, 0},
+			want:      "2026-10-01",
+		},
+		{
+			// Last Mow 09-18: the Minimum Interval ends on 09-23 and the
+			// Target Date is 09-25. Today (09-22) is good but too soon.
+			name:    "never goes back before the Minimum Interval",
+			lastMow: "2026-09-18",
+			rain:    []float64{0, 90, 90, 90, 0, 0, 0, 0},
+			want:    "2026-09-27",
+		},
+		{
+			name:      "no Last Mow means the first good day from today",
+			noLastMow: true,
+			rain:      []float64{90, 90, 0, 0, 0, 0, 0, 0},
+			want:      "2026-09-25",
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := EarliestEligibleDate(today, tc.lastMow, tc.minDays)
-			if !got.Equal(tc.want) {
-				t.Errorf("EarliestEligibleDate() = %v, want %v", got, tc.want)
+			in := baseInput()
+			in.Forecast = week("2026-09-22", tc.rain...)
+			if tc.lastMow != "" {
+				in.LastMow = ptr(date(tc.lastMow))
+			}
+			if tc.noLastMow {
+				in.LastMow = nil
+			}
+			if tc.idealDays != 0 {
+				in.IdealIntervalDays = tc.idealDays
+			}
+
+			got := Plan(in)
+
+			if got.Action != ActionCreate {
+				t.Fatalf("Action = %v, want create", got.Action)
+			}
+			if gotDate := got.Date.Format("2006-01-02"); gotDate != tc.want {
+				t.Errorf("Date = %s, want %s", gotDate, tc.want)
 			}
 		})
 	}
 }
 
-func TestChooseMowDate(t *testing.T) {
-	forecast := []ForecastDay{
-		{Date: date("2026-09-22"), RainProbabilityPercent: 10}, // eligible? depends on test
-		{Date: date("2026-09-23"), RainProbabilityPercent: 80},
-		{Date: date("2026-09-24"), RainProbabilityPercent: 90},
-		{Date: date("2026-09-25"), RainProbabilityPercent: 20},
-		{Date: date("2026-09-26"), RainProbabilityPercent: 5},
+func TestPlan_LeavesItsOwnPlannedMowAloneWhenNothingChanged(t *testing.T) {
+	in := baseInput()
+	in.Forecast = week("2026-09-22", 0, 0, 0, 0, 0, 0, 0, 0)
+	created := Plan(in)
+
+	in.Scheduled = &ScheduledMow{Due: created.Date, Description: created.Description}
+	got := Plan(in)
+
+	if got.Action != ActionNone {
+		t.Errorf("Action = %v, want none", got.Action)
 	}
-
-	t.Run("skips days before the eligible window even if drier", func(t *testing.T) {
-		// 2026-09-22 is the driest day overall, but it's before the
-		// eligible window, so it must never be chosen.
-		got, ok := ChooseMowDate(forecast, date("2026-09-23"), 30)
-		if !ok {
-			t.Fatalf("expected a day to be chosen")
-		}
-		if !got.Date.Equal(date("2026-09-25")) {
-			t.Errorf("got date %v, want 2026-09-25", got.Date)
-		}
-	})
-
-	t.Run("picks the first day at/under threshold, not the driest", func(t *testing.T) {
-		// 2026-09-26 is drier than 2026-09-25, but 09-25 should win
-		// because it's the *first* day under threshold.
-		got, ok := ChooseMowDate(forecast, date("2026-09-22"), 25)
-		if !ok {
-			t.Fatalf("expected a day to be chosen")
-		}
-		if !got.Date.Equal(date("2026-09-22")) {
-			t.Errorf("got date %v, want 2026-09-22", got.Date)
-		}
-	})
-
-	t.Run("threshold is inclusive", func(t *testing.T) {
-		got, ok := ChooseMowDate(forecast, date("2026-09-25"), 20)
-		if !ok {
-			t.Fatalf("expected a day to be chosen")
-		}
-		if !got.Date.Equal(date("2026-09-25")) {
-			t.Errorf("got date %v, want 2026-09-25", got.Date)
-		}
-	})
-
-	t.Run("returns false when nothing qualifies", func(t *testing.T) {
-		_, ok := ChooseMowDate(forecast, date("2026-09-23"), 1)
-		if ok {
-			t.Fatalf("expected no day to qualify")
-		}
-	})
-
-	t.Run("works with unsorted input", func(t *testing.T) {
-		unsorted := []ForecastDay{forecast[4], forecast[0], forecast[3], forecast[1], forecast[2]}
-		got, ok := ChooseMowDate(unsorted, date("2026-09-22"), 25)
-		if !ok {
-			t.Fatalf("expected a day to be chosen")
-		}
-		if !got.Date.Equal(date("2026-09-22")) {
-			t.Errorf("got date %v, want 2026-09-22", got.Date)
-		}
-	})
-
-	t.Run("empty forecast returns false", func(t *testing.T) {
-		_, ok := ChooseMowDate(nil, date("2026-09-22"), 100)
-		if ok {
-			t.Fatalf("expected no day to qualify for an empty forecast")
-		}
-	})
 }
 
-func ptr(t time.Time) *time.Time { return &t }
+func TestPlan_MovesItsOwnPlannedMowWhenTheForecastChanges(t *testing.T) {
+	in := baseInput()
+	in.Forecast = week("2026-09-22", 0, 0, 0, 0, 0, 0, 0, 0)
+	created := Plan(in) // 09-24
+
+	in.Scheduled = &ScheduledMow{Due: created.Date, Description: created.Description}
+	in.Forecast = week("2026-09-22", 0, 0, 90, 0, 0, 0, 0, 0)
+	got := Plan(in)
+
+	if got.Action != ActionMove {
+		t.Fatalf("Action = %v, want move", got.Action)
+	}
+	if gotDate := got.Date.Format("2006-01-02"); gotDate != "2026-09-23" {
+		t.Errorf("Date = %s, want 2026-09-23", gotDate)
+	}
+
+	// The moved task is still the app's to re-plan.
+	in.Scheduled = &ScheduledMow{Due: got.Date, Description: got.Description}
+	if again := Plan(in); again.Action != ActionNone {
+		t.Errorf("after the move, Action = %v, want none", again.Action)
+	}
+}
+
+func TestPlan_MovesAnOverduePlannedMow(t *testing.T) {
+	in := baseInput()
+	in.LastMow = ptr(date("2026-09-13")) // Target Date 09-20
+	in.Today = date("2026-09-20")
+	in.Forecast = week("2026-09-20", 0, 0, 0, 0, 0, 0, 0, 0)
+	created := Plan(in)
+
+	// Two days later it rained on the 20th, and the task is still open.
+	in.Today = date("2026-09-22")
+	in.Forecast = week("2026-09-22", 0, 0, 0, 0, 0, 0, 0, 0)
+	in.Scheduled = &ScheduledMow{Due: created.Date, Description: created.Description}
+	got := Plan(in)
+
+	if got.Action != ActionMove {
+		t.Fatalf("Action = %v, want move", got.Action)
+	}
+	if gotDate := got.Date.Format("2006-01-02"); gotDate != "2026-09-22" {
+		t.Errorf("Date = %s, want 2026-09-22", gotDate)
+	}
+}
+
+func TestPlan_NeverTouchesAPinnedMow(t *testing.T) {
+	in := baseInput()
+	in.Forecast = week("2026-09-22", 0, 0, 0, 0, 0, 0, 0, 0)
+	planned := Plan(in) // 09-24, marker says 09-24
+
+	tests := []struct {
+		name      string
+		scheduled ScheduledMow
+	}{
+		{
+			name:      "the owner created it",
+			scheduled: ScheduledMow{Due: date("2026-09-27"), Description: "remember the edges"},
+		},
+		{
+			name:      "the owner moved a Planned Mow",
+			scheduled: ScheduledMow{Due: date("2026-09-27"), Description: planned.Description},
+		},
+		{
+			name:      "the owner's task is overdue",
+			scheduled: ScheduledMow{Due: date("2026-09-20")},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			in.Scheduled = &tc.scheduled
+
+			got := Plan(in)
+
+			if got.Action != ActionNone {
+				t.Errorf("Action = %v, want none", got.Action)
+			}
+		})
+	}
+}

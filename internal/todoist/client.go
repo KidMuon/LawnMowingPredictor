@@ -1,7 +1,7 @@
 // Package todoist is a minimal client for the parts of Todoist's unified
 // API v1 (https://developer.todoist.com/api/v1/) this application needs:
-// finding the most recently completed mowing task, checking whether a
-// future mowing task is already scheduled, and creating a new one.
+// finding the most recently completed mowing task, finding the open one,
+// and creating or moving it.
 //
 // Note: Todoist retired its old REST API v2 and Sync API v9 in favor of
 // this unified v1 API during 2026. If Todoist changes response shapes
@@ -19,6 +19,8 @@ import (
 	"net/http"
 	"net/url"
 	"time"
+
+	"github.com/KidMuon/LawnMowingPredictor/internal/httpretry"
 )
 
 const defaultBaseURL = "https://api.todoist.com/api/v1"
@@ -31,6 +33,9 @@ type Client struct {
 	// BaseURL overrides the API endpoint; used by tests. Defaults to
 	// Todoist's production unified API v1 endpoint.
 	BaseURL string
+	// RetryDelay is the wait between retries of a temporary server
+	// error. Defaults to httpretry.DefaultDelay.
+	RetryDelay time.Duration
 }
 
 // NewClient returns a Client ready to make requests.
@@ -55,6 +60,7 @@ type Due struct {
 type Task struct {
 	ID          string   `json:"id"`
 	Content     string   `json:"content"`
+	Description string   `json:"description"`
 	Labels      []string `json:"labels"`
 	Priority    int      `json:"priority"`
 	ProjectID   string   `json:"project_id"`
@@ -71,9 +77,10 @@ type pagedTasksResponse struct {
 
 // FindLatestCompletedByLabel searches Todoist's completed-task history,
 // going back up to lookback from now, for tasks carrying label. It returns
-// the calendar date (UTC midnight) of the most recently completed matching
-// task, or nil if none was found in that window.
-func (c *Client) FindLatestCompletedByLabel(ctx context.Context, label string, lookback time.Duration) (*time.Time, error) {
+// the Mow Date of the most recently completed matching task: the calendar
+// date in loc (the lawn's timezone) it was ticked off, as UTC midnight. It
+// returns nil if none was found in that window.
+func (c *Client) FindLatestCompletedByLabel(ctx context.Context, label string, lookback time.Duration, loc *time.Location) (*time.Time, error) {
 	until := time.Now().UTC()
 	since := until.Add(-lookback)
 
@@ -96,7 +103,7 @@ func (c *Client) FindLatestCompletedByLabel(ctx context.Context, label string, l
 		if !hasLabel(t.Labels, label) {
 			continue
 		}
-		when, ok := t.completionOrDueDate()
+		when, ok := t.completionOrDueDate(loc)
 		if !ok {
 			continue
 		}
@@ -108,13 +115,10 @@ func (c *Client) FindLatestCompletedByLabel(ctx context.Context, label string, l
 	return latest, nil
 }
 
-// FindOpenFutureTaskByLabel looks for an incomplete task carrying label
-// whose due date is on or after onOrAfter. It returns the first such task
-// found, or nil if there isn't one. This is used to avoid scheduling a
-// second mowing task while one is already pending.
-func (c *Client) FindOpenFutureTaskByLabel(ctx context.Context, label string, onOrAfter time.Time) (*Task, error) {
-	onOrAfter = truncateToDate(onOrAfter)
-
+// FindScheduledMow returns the Scheduled Mow: the open task carrying label
+// with the earliest due date, whether or not it's overdue. Tasks with no
+// due date come last. It returns nil if there's no open labelled task.
+func (c *Client) FindScheduledMow(ctx context.Context, label string) (*Task, error) {
 	q := url.Values{}
 	q.Set("label", label)
 
@@ -123,23 +127,26 @@ func (c *Client) FindOpenFutureTaskByLabel(ctx context.Context, label string, on
 		return nil, err
 	}
 
+	var earliest *Task
 	for i := range tasks {
-		t := tasks[i]
+		t := &tasks[i]
 		if !hasLabel(t.Labels, label) {
 			continue
 		}
-		if t.Due == nil || t.Due.Date == "" {
-			continue
-		}
-		due, err := time.Parse("2006-01-02", t.Due.Date)
-		if err != nil {
-			continue
-		}
-		if !truncateToDate(due).Before(onOrAfter) {
-			return &t, nil
+		if earliest == nil || dueSortKey(t) < dueSortKey(earliest) {
+			earliest = t
 		}
 	}
-	return nil, nil
+	return earliest, nil
+}
+
+// dueSortKey orders tasks by due date (YYYY-MM-DD sorts as a string), with
+// undated tasks last.
+func dueSortKey(t *Task) string {
+	if t.Due == nil || t.Due.Date == "" {
+		return "9999-99-99"
+	}
+	return t.Due.Date
 }
 
 // createTaskRequest is the POST /tasks body.
@@ -161,14 +168,34 @@ func (c *Client) CreateTask(ctx context.Context, content, description string, du
 		Labels:      []string{label},
 		DueDate:     dueDate.Format("2006-01-02"),
 	}
+	return c.postTask(ctx, "/tasks", body)
+}
+
+// moveTaskRequest is the POST /tasks/{id} body.
+type moveTaskRequest struct {
+	Description string `json:"description"`
+	DueDate     string `json:"due_date"`
+}
+
+// MoveTask changes the due date and description of the task with id.
+func (c *Client) MoveTask(ctx context.Context, id string, dueDate time.Time, description string) (*Task, error) {
+	body := moveTaskRequest{
+		Description: description,
+		DueDate:     dueDate.Format("2006-01-02"),
+	}
+	return c.postTask(ctx, "/tasks/"+url.PathEscape(id), body)
+}
+
+// postTask POSTs body as JSON to path and parses the task it returns.
+func (c *Client) postTask(ctx context.Context, path string, body any) (*Task, error) {
 	payload, err := json.Marshal(body)
 	if err != nil {
-		return nil, fmt.Errorf("todoist: encoding create-task request: %w", err)
+		return nil, fmt.Errorf("todoist: encoding POST %s request: %w", path, err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL()+"/tasks", bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL()+path, bytes.NewReader(payload))
 	if err != nil {
-		return nil, fmt.Errorf("todoist: building create-task request: %w", err)
+		return nil, fmt.Errorf("todoist: building POST %s request: %w", path, err)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.Token)
 	req.Header.Set("Content-Type", "application/json")
@@ -178,12 +205,12 @@ func (c *Client) CreateTask(ctx context.Context, content, description string, du
 		return nil, err
 	}
 	if status != http.StatusOK && status != http.StatusCreated {
-		return nil, fmt.Errorf("todoist: POST /tasks: unexpected status %d: %s", status, truncate(string(respBody), 500))
+		return nil, fmt.Errorf("todoist: POST %s: unexpected status %d: %s", path, status, truncate(string(respBody), 500))
 	}
 
 	var task Task
 	if err := json.Unmarshal(respBody, &task); err != nil {
-		return nil, fmt.Errorf("todoist: parsing create-task response: %w", err)
+		return nil, fmt.Errorf("todoist: parsing POST %s response: %w", path, err)
 	}
 	return &task, nil
 }
@@ -241,7 +268,11 @@ func (c *Client) do(req *http.Request) ([]byte, int, error) {
 		httpClient = http.DefaultClient
 	}
 
-	resp, err := httpClient.Do(req)
+	delay := c.RetryDelay
+	if delay == 0 {
+		delay = httpretry.DefaultDelay
+	}
+	resp, err := httpretry.Do(httpClient, req, delay)
 	if err != nil {
 		return nil, 0, fmt.Errorf("todoist: request failed: %w", err)
 	}
@@ -262,12 +293,12 @@ func (c *Client) baseURL() string {
 }
 
 // completionOrDueDate returns the best available date representing when a
-// completed task was done: its completed_at timestamp if present and
-// parseable, otherwise its due date.
-func (t Task) completionOrDueDate() (time.Time, bool) {
+// completed task was done: the date in loc of its completed_at timestamp
+// if present and parseable, otherwise its due date.
+func (t Task) completionOrDueDate(loc *time.Location) (time.Time, bool) {
 	if t.CompletedAt != "" {
 		if ts, err := parseTodoistTimestamp(t.CompletedAt); err == nil {
-			return truncateToDate(ts), true
+			return truncateToDate(ts.In(loc)), true
 		}
 	}
 	if t.Due != nil && t.Due.Date != "" {
