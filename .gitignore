@@ -12,3 +12,6 @@ config.yaml
 
 # Editor/OS cruft
 .DS_Store
+
+# Local run output (e.g. from cron)
+log.txt
